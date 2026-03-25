@@ -2,6 +2,7 @@ from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from src.api.deps import verify_internal, get_current_user_email
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.response import (
@@ -15,6 +16,7 @@ from src.api.response import (
 from src.core.database import get_db
 from src.service.movie import MovieService
 from src.service.scrape import ScrapeService
+from src.external.kobis import KobisClient
 
 """
 영화 API 엔드포인트
@@ -30,6 +32,7 @@ router = APIRouter(prefix="/movies", tags=["Movies"])
 # 서비스 인스턴스 (싱글톤으로 재사용)
 _movie_svc = MovieService()
 _scrape_svc = ScrapeService()
+_kobis_client = KobisClient()
 
 
 # --------------------------------------------- ENDPOINT ---------------------------------------------
@@ -37,6 +40,7 @@ _scrape_svc = ScrapeService()
 @router.get("/search", response_model=SearchOut, summary="영화 DB 검색")
 async def search_movies(
     q: str = Query(..., min_length=1, description="검색할 영화 제목"),
+    # user_email: str = Depends(get_current_user_email), 잠시
     db: AsyncSession = Depends(get_db),
 ) -> SearchOut:
     """
@@ -66,6 +70,7 @@ async def search_movies(
 async def scrape_movie(
     title: str = Query(..., min_length=1, description="스크래핑할 영화 제목"),
     db: AsyncSession = Depends(get_db),
+    # user_email: str = Depends(get_current_user_email), 잠시
 ) -> ScrapeOut:
     """
     주어진 영화 제목으로 스크래핑하고 DB에 적재합니다.
@@ -103,6 +108,7 @@ async def get_dashboard(
     date_from: Optional[date] = Query(None, description="조회 시작일 (YYYY-MM-DD)"),
     date_to: Optional[date] = Query(None, description="조회 종료일 (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db),
+    # user_email: str = Depends(get_current_user_email), 잠시
 ) -> DashboardOut:
     """
     영화 대시보드 데이터 조회
@@ -141,3 +147,15 @@ async def get_dashboard(
         peak_audi_date=result.peak_audi_date,
         peak_sales_date=result.peak_sales_date,
     )
+
+@router.get("/suggest", summary="채팅창 @ 멘션용 영화 실시간 자동완성")
+async def suggest_movies(
+    q: str = Query(..., min_length=1, description="검색할 영화 제목 조각"),
+):
+    """
+    KOBIS API를 직접 호출하여 실시간으로 영화 제목을 자동완성해 줍니다.
+    """
+    # I/O 블로킹 방지를 위해 asyncio.to_thread 사용 권장
+    import asyncio
+    results = await asyncio.to_thread(_kobis_client.search_movie_list, q)
+    return {"query": q, "suggestions": results}

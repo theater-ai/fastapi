@@ -13,3 +13,9 @@ pandas
 requests
 lxml
 alembic==1.7.7
+
+# LangGraph
+langchain-core
+langchain-openai
+langgraph
+

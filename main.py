@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.router import router # API 라우터
+from src.api.chat import router as chat_router # Chat API 라우터
 from src.core.config import get_settings
 from src.core.database import check_db_connection
 
@@ -41,8 +42,8 @@ app.add_middleware(
 
 # API 라우터 등록
 app.include_router(router)
+app.include_router(chat_router)
 
-# 헬스체크 엔드포인트 (선택)
 @app.get("/health", tags=["System"])
 async def health_check():
     db_ok = await check_db_connection()

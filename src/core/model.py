@@ -134,3 +134,19 @@ class DailyBoxoffice(Base):
 
     def __repr__(self) -> str:
         return f"<DailyBoxoffice movie={self.movie_cd!r} date={self.target_date!r}>"
+    
+
+CHAT_SCHEMA = "chat"
+
+class ChatMessage(Base):
+    __tablename__ = "chat_message"
+    __table_args__ = {"schema": CHAT_SCHEMA}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False) # 'user' 또는 'assistant'
+    content: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
+
+    def __repr__(self) -> str:
+        return f"<ChatMessage session={self.session_id!r} role={self.role!r}>"

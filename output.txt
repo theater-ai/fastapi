@@ -1,0 +1,1782 @@
+```
+./alembic.ini
+
+[alembic]
+script_location = alembic
+prepend_sys_path = .   # 추가
+
+# env.py에서 동적으로 설정하므로 비워둠
+sqlalchemy.url =
+
+[loggers]
+keys = root,sqlalchemy,alembic
+
+[handlers]
+keys = console
+
+[formatters]
+keys = generic
+
+[logger_root]
+level = WARN
+handlers = console
+qualname =
+
+[logger_sqlalchemy]
+level = WARN
+handlers =
+qualname = sqlalchemy.engine
+
+[logger_alembic]
+level = INFO
+handlers =
+qualname = alembic
+
+[handler_console]
+class = StreamHandler
+args = (sys.stderr,)
+level = NOTSET
+formatter = generic
+
+[formatter_generic]
+format = %(levelname)-5.5s [%(name)s] %(message)s
+datefmt = %H:%M:%S
+
+```
+
+```
+./Dockerfile
+
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# entrypoint 실행 권한 부여
+RUN chmod +x entrypoint.sh
+
+EXPOSE 8000
+
+CMD ["sh", "./entrypoint.sh"]
+
+```
+
+```
+./alembic/script.py.mako
+
+"""${message}
+
+Revision ID: ${up_revision}
+Revises: ${down_revision | comma,n}
+Create Date: ${create_date}
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+${imports if imports else ""}
+
+# revision identifiers, used by Alembic.
+revision: str = ${repr(up_revision)}
+down_revision: Union[str, Sequence[str], None] = ${repr(down_revision)}
+branch_labels: Union[str, Sequence[str], None] = ${repr(branch_labels)}
+depends_on: Union[str, Sequence[str], None] = ${repr(depends_on)}
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    ${upgrades if upgrades else "pass"}
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    ${downgrades if downgrades else "pass"}
+
+```
+
+```
+./alembic/env.py
+
+import os
+import sys
+from logging.config import fileConfig
+from pathlib import Path
+
+from sqlalchemy import engine_from_config, pool, text
+from alembic import context
+
+# PYTHONPATH: /app 을 sys.path에 추가 (Docker WORKDIR = /app)
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# 프로젝트 모델 임포트
+from src.core.model import Base  # noqa: E402
+
+# alembic.ini의 로깅 설정 적용
+config = context.config
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
+
+# Alembic이 추적할 메타데이터 (autogenerate 용)
+target_metadata = Base.metadata
+
+# DB URL을 환경변수에서 동적으로 주입
+def get_sync_url() -> str:
+    user     = os.getenv("POSTGRES_USER", "postgres")
+    password = os.getenv("POSTGRES_PASSWORD", "postgres")
+    host     = os.getenv("DB_CONTAINER", "127.0.0.1")
+    port     = os.getenv("POSTGRES_PORT", "5432")
+    db       = os.getenv("POSTGRES_DB", "moviedb")
+    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
+# 마이그레이션 대상 스키마 지정(movie와 chat)
+MOVIE_SCHEMA = "movie"
+CHAT_SCHEMA = "chat"
+
+
+def _include_object(obj, name, type_, reflected, compare_to):
+    """
+    movie, chat 스키마의 테이블만 추적.
+    - type_ == "table" 인 경우: obj.schema 가 TARGET_SCHEMA 인 것만 포함
+    - 그 외(index, constraint 등): 모두 포함
+    """
+
+    # Alembic이 테이블을 추적할 때, obj.schema가 TARGET_SCHEMA에 포함된 경우에만 포함하도록 설정
+    if type_ == "table":
+        return obj.schema in [MOVIE_SCHEMA, CHAT_SCHEMA]
+    
+    # 인덱스, 제약조건 등은 모두 포함 (스키마에 상관없이)
+    if hasattr(obj, "table") and obj.table is not None:
+        return obj.table.schema in [MOVIE_SCHEMA, CHAT_SCHEMA]
+
+    return True
+
+
+def run_migrations_offline() -> None:
+    """마이그레이션 SQL만 생성 (DB 연결 없이)"""
+    url = get_sync_url()
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        version_table_schema=MOVIE_SCHEMA,
+        include_schemas=True,
+        include_object=_include_object,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """실제 DB에 마이그레이션 적용"""
+    configuration = config.get_section(config.config_ini_section, {})
+    configuration["sqlalchemy.url"] = get_sync_url()
+
+    connectable = engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    with connectable.connect() as connection:
+        # movie, chat 스키마 생성 (없을 경우에만)
+        for schema in [MOVIE_SCHEMA, CHAT_SCHEMA]:
+            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
+        connection.execute(text(f"SET search_path TO {', '.join([MOVIE_SCHEMA, CHAT_SCHEMA])}"))
+        connection.commit()
+
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table_schema=MOVIE_SCHEMA,
+            include_schemas=True,
+            include_object=_include_object,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
+
+```
+
+```
+./alembic/versions/215d31439c3b_init_tables.py
+
+"""init tables
+
+Revision ID: 215d31439c3b
+Revises: 
+Create Date: 2026-03-23 05:31:04.107044
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '215d31439c3b'
+down_revision: Union[str, Sequence[str], None] = None
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('movie',
+    sa.Column('movie_cd', sa.String(length=20), nullable=False),
+    sa.Column('movie_nm', sa.String(length=255), nullable=False),
+    sa.Column('movie_nm_en', sa.String(length=255), nullable=True),
+    sa.Column('open_dt', sa.Date(), nullable=True),
+    sa.Column('rep_genre_nm', sa.String(length=50), nullable=True),
+    sa.Column('rep_nation_nm', sa.String(length=50), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.PrimaryKeyConstraint('movie_cd'),
+    schema='movie'
+    )
+    op.create_table('person',
+    sa.Column('people_cd', sa.String(length=20), nullable=False),
+    sa.Column('people_nm', sa.String(length=100), nullable=False),
+    sa.Column('people_nm_en', sa.String(length=100), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.PrimaryKeyConstraint('people_cd'),
+    schema='movie'
+    )
+    op.create_table('daily_boxoffice',
+    sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column('movie_cd', sa.String(length=20), nullable=False),
+    sa.Column('target_date', sa.Date(), nullable=False),
+    sa.Column('rank_num', sa.Integer(), nullable=True),
+    sa.Column('screen_cnt', sa.Integer(), nullable=True),
+    sa.Column('screen_share', sa.Numeric(precision=5, scale=2), nullable=True),
+    sa.Column('show_cnt', sa.Integer(), nullable=True),
+    sa.Column('show_share', sa.Numeric(precision=5, scale=2), nullable=True),
+    sa.Column('seat_cnt', sa.Integer(), nullable=True),
+    sa.Column('seat_share', sa.Numeric(precision=5, scale=2), nullable=True),
+    sa.Column('seat_sales_rate', sa.Numeric(precision=5, scale=2), nullable=True),
+    sa.Column('sales_amt', sa.BigInteger(), nullable=True),
+    sa.Column('sales_change_dod', sa.BigInteger(), nullable=True),
+    sa.Column('audi_cnt', sa.Integer(), nullable=True),
+    sa.Column('audi_change_dod', sa.Integer(), nullable=True),
+    sa.Column('acc_sales_amt', sa.BigInteger(), nullable=True),
+    sa.Column('acc_audi_cnt', sa.BigInteger(), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.ForeignKeyConstraint(['movie_cd'], ['movie.movie.movie_cd'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('movie_cd', 'target_date', name='uq_daily_boxoffice'),
+    schema='movie'
+    )
+    op.create_table('movie_credit',
+    sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column('movie_cd', sa.String(length=20), nullable=False),
+    sa.Column('people_cd', sa.String(length=20), nullable=False),
+    sa.Column('role_type', sa.String(length=20), nullable=False),
+    sa.Column('cast_nm', sa.String(length=100), nullable=True),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.ForeignKeyConstraint(['movie_cd'], ['movie.movie.movie_cd'], ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['people_cd'], ['movie.person.people_cd'], ondelete='CASCADE'),
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('movie_cd', 'people_cd', 'role_type', name='uq_movie_credit'),
+    schema='movie'
+    )
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_table('movie_credit', schema='movie')
+    op.drop_table('daily_boxoffice', schema='movie')
+    op.drop_table('person', schema='movie')
+    op.drop_table('movie', schema='movie')
+    # ### end Alembic commands ###
+
+```
+
+```
+./alembic/versions/da1ed151c6b2_add_chat_message_table.py
+
+"""add chat message table
+
+Revision ID: da1ed151c6b2
+Revises: 215d31439c3b
+Create Date: 2026-03-25 04:45:23.237850
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = 'da1ed151c6b2'
+down_revision: Union[str, Sequence[str], None] = '215d31439c3b'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.create_table('chat_message',
+    sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
+    sa.Column('session_id', sa.String(length=36), nullable=False),
+    sa.Column('role', sa.String(length=20), nullable=False),
+    sa.Column('content', sa.String(), nullable=False),
+    sa.Column('created_at', sa.DateTime(), server_default=sa.text('CURRENT_TIMESTAMP'), nullable=False),
+    sa.PrimaryKeyConstraint('id'),
+    schema='chat'
+    )
+    op.create_index(op.f('ix_chat_chat_message_session_id'), 'chat_message', ['session_id'], unique=False, schema='chat')
+    # ### end Alembic commands ###
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    # ### commands auto generated by Alembic - please adjust! ###
+    op.drop_index(op.f('ix_chat_chat_message_session_id'), table_name='chat_message', schema='chat')
+    op.drop_table('chat_message', schema='chat')
+    # ### end Alembic commands ###
+
+```
+
+```
+./alembic/README
+
+Generic single-database configuration.
+```
+
+```
+./main.py
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from src.api.router import router # API 라우터
+from src.api.chat import router as chat_router # Chat API 라우터
+from src.core.config import get_settings
+from src.core.database import check_db_connection
+
+settings = get_settings()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    서버 시작 시 DB 연결 확인 → 로그 출력.
+    실제 DB 연결 풀은 첫 요청 시점에 생성되므로, 여기서는 단순히 연결 가능 여부만 체크
+    서버 종료 시 로그 출력.
+    """
+    print(f"{settings.APP_TITLE} v{settings.APP_VERSION} starting up...")
+    connected = await check_db_connection()
+    print("DB connection established" if connected else "DB connection failed")
+    yield
+    print("server shutting down...")
+
+
+# FastAPI 애플리케이션 생성 및 설정
+app = FastAPI(
+    title=settings.APP_TITLE,
+    version=settings.APP_VERSION,
+    lifespan=lifespan,
+)
+
+# CORS 설정 (개발 편의 위해 모든 출처 허용)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API 라우터 등록
+app.include_router(router)
+app.include_router(chat_router)
+
+@app.get("/health", tags=["System"])
+async def health_check():
+    db_ok = await check_db_connection()
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": "connected" if db_ok else "unreachable",
+        "version": settings.APP_VERSION,
+    }
+```
+
+```
+./src/repository/person.py
+
+
+```
+
+```
+./src/repository/boxoffice.py
+
+
+```
+
+```
+./src/repository/movie.py
+
+
+from datetime import date
+from typing import Optional
+
+import pandas as pd
+from sqlalchemy import or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from src.core.model import DailyBoxoffice, Movie, MovieCredit, Person, SCHEMA
+
+
+class MovieRepository:
+    """
+    Movie / Person / MovieCredit / DailyBoxoffice DB 접근 전담.
+    비즈니스 로직 없이 쿼리만 포함합니다.
+    """
+
+    # ── 조회 ─────────────────────────────────────────────────────────────────
+
+    async def search(self, db: AsyncSession, query: str) -> list[Movie]:
+        """제목(한글/영문) LIKE 검색. 최대 20건."""
+        stmt = (
+            select(Movie)
+            .where(
+                or_(
+                    Movie.movie_nm.ilike(f"%{query}%"),
+                    Movie.movie_nm_en.ilike(f"%{query}%"),
+                )
+            )
+            .order_by(Movie.open_dt.desc().nullslast())
+            .limit(20)
+        )
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_with_credits(
+        self, db: AsyncSession, movie_cd: str
+    ) -> Movie | None:
+        """영화 + 출연진 eager load."""
+        stmt = (
+            select(Movie)
+            .options(selectinload(Movie.credits).selectinload(MovieCredit.person))
+            .where(Movie.movie_cd == movie_cd)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def get_boxoffice(
+        self,
+        db: AsyncSession,
+        movie_cd: str,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> list[DailyBoxoffice]:
+        """박스오피스 시계열 조회 (기간 필터 선택)."""
+        stmt = (
+            select(DailyBoxoffice)
+            .where(DailyBoxoffice.movie_cd == movie_cd)
+            .order_by(DailyBoxoffice.target_date)
+        )
+        if date_from:
+            stmt = stmt.where(DailyBoxoffice.target_date >= date_from)
+        if date_to:
+            stmt = stmt.where(DailyBoxoffice.target_date <= date_to)
+
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    # ── 저장 ─────────────────────────────────────────────────────────────────
+
+    async def upsert_movie(self, db: AsyncSession, movie_data: dict) -> Movie:
+        """영화 마스터 upsert 후 ORM 객체 반환."""
+        await db.execute(
+            pg_insert(Movie)
+            .values(**movie_data)
+            .on_conflict_do_update(
+                index_elements=["movie_cd"],
+                set_={"movie_nm": movie_data["movie_nm"]},
+            )
+        )
+        await db.flush()
+        result = await db.execute(
+            select(Movie).where(Movie.movie_cd == movie_data["movie_cd"])
+        )
+        return result.scalar_one()
+
+    async def upsert_person(self, db: AsyncSession, people_cd: str, people_nm: str) -> None:
+        await db.execute(
+            pg_insert(Person)
+            .values(people_cd=people_cd, people_nm=people_nm)
+            .on_conflict_do_nothing()
+        )
+
+    async def upsert_credit(
+        self,
+        db: AsyncSession,
+        movie_cd: str,
+        people_cd: str,
+        role_type: str,
+        cast_nm: Optional[str],
+    ) -> None:
+        await db.execute(
+            pg_insert(MovieCredit)
+            .values(
+                movie_cd=movie_cd,
+                people_cd=people_cd,
+                role_type=role_type,
+                cast_nm=cast_nm,
+            )
+            .on_conflict_do_nothing()
+        )
+
+    async def upsert_boxoffice_rows(
+        self, db: AsyncSession, df: pd.DataFrame
+    ) -> int:
+        """DataFrame 행을 daily_boxoffice에 upsert. 적재 행 수 반환."""
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            await db.execute(
+                pg_insert(DailyBoxoffice)
+                .values(**row_dict)
+                .on_conflict_do_update(
+                    index_elements=["movie_cd", "target_date"],
+                    set_={
+                        "rank_num": row_dict.get("rank_num"),
+                        "audi_cnt": row_dict.get("audi_cnt"),
+                        "sales_amt": row_dict.get("sales_amt"),
+                    },
+                )
+            )
+        await db.flush()
+        return len(df)
+```
+
+```
+./src/core/config.py
+
+import os
+from functools import lru_cache
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # Database
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "postgres")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "postgres")
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "moviedb")
+    DB_CONTAINER: str = os.getenv("DB_CONTAINER", "127.0.0.1")
+    POSTGRES_PORT: str = os.getenv("POSTGRES_PORT", "5432")
+
+    # KOBIS
+    KOBIS_API_KEY: str = os.getenv("KOBIS_API_KEY", "")
+
+    # App
+    APP_TITLE: str = "Movie Dashboard API"
+    APP_VERSION: str = "0.1.0"
+    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
+
+    @property
+    def DATABASE_URL(self) -> str:
+        return (
+            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.DB_CONTAINER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
+    def DATABASE_URL_SYNC(self) -> str:
+        return (
+            f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.DB_CONTAINER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+```
+
+```
+./src/core/database.py
+
+from collections.abc import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+from sqlalchemy.pool import NullPool
+
+from src.core.config import get_settings
+
+settings = get_settings()
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 비동기 엔진 & 세션 팩토리
+# ──────────────────────────────────────────────────────────────────────────────
+engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=settings.DEBUG,           # DEBUG=true 이면 SQL 로그 출력
+    pool_pre_ping=True,            # 끊긴 커넥션 자동 재연결
+    pool_size=10,
+    max_overflow=20,
+)
+
+AsyncSessionFactory = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,        # commit 후에도 객체 속성 접근 가능
+    autoflush=False,
+    autocommit=False,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FastAPI Dependency: DB 세션 주입
+# ──────────────────────────────────────────────────────────────────────────────
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
+    """
+    FastAPI 엔드포인트에서 아래와 같이 주입하여 사용합니다:
+
+        async def my_endpoint(db: AsyncSession = Depends(get_db)):
+            result = await db.execute(select(Movie))
+            ...
+    """
+    async with AsyncSessionFactory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 헬스체크용 연결 확인 함수
+# ──────────────────────────────────────────────────────────────────────────────
+async def check_db_connection() -> bool:
+    """DB 연결 상태 확인. 헬스체크 엔드포인트에서 사용."""
+    from sqlalchemy import text
+
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
+```
+
+```
+./src/core/__init__.py
+
+from src.core.config import Settings, get_settings
+from src.core.database import AsyncSessionFactory, check_db_connection, engine, get_db
+from src.core.model import Base, DailyBoxoffice, Movie, MovieCredit, Person
+
+__all__ = [
+    "Settings",
+    "get_settings",
+    "engine",
+    "AsyncSessionFactory",
+    "get_db",
+    "check_db_connection",
+    "Base",
+    "Movie",
+    "Person",
+    "MovieCredit",
+    "DailyBoxoffice",
+]
+```
+
+```
+./src/core/model.py
+
+"""
+core/model.py
+
+SQLAlchemy ORM 모델 정의.
+모든 테이블은 'movie' 스키마에 생성됩니다.
+"""
+
+from datetime import date, datetime
+from decimal import Decimal
+from typing import List, Optional
+
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+SCHEMA = "movie"
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Movie(Base):
+    __tablename__ = "movie"
+    __table_args__ = {"schema": SCHEMA}
+
+    movie_cd: Mapped[str] = mapped_column(String(20), primary_key=True)
+    movie_nm: Mapped[str] = mapped_column(String(255), nullable=False)
+    movie_nm_en: Mapped[Optional[str]] = mapped_column(String(255))
+    open_dt: Mapped[Optional[date]] = mapped_column(Date)
+    rep_genre_nm: Mapped[Optional[str]] = mapped_column(String(50))
+    rep_nation_nm: Mapped[Optional[str]] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+    credits: Mapped[List["MovieCredit"]] = relationship(
+        back_populates="movie", cascade="all, delete-orphan"
+    )
+    boxoffice_records: Mapped[List["DailyBoxoffice"]] = relationship(
+        back_populates="movie", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Movie cd={self.movie_cd!r} nm={self.movie_nm!r}>"
+
+
+class Person(Base):
+    __tablename__ = "person"
+    __table_args__ = {"schema": SCHEMA}  # 버그 수정: __tagle_args__ → __table_args__
+
+    people_cd: Mapped[str] = mapped_column(String(20), primary_key=True)
+    people_nm: Mapped[str] = mapped_column(String(100), nullable=False)
+    people_nm_en: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+    credits: Mapped[List["MovieCredit"]] = relationship(
+        back_populates="person", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Person cd={self.people_cd!r} nm={self.people_nm!r}>"
+
+
+class MovieCredit(Base):
+    __tablename__ = "movie_credit"
+    __table_args__ = (
+        UniqueConstraint("movie_cd", "people_cd", "role_type", name="uq_movie_credit"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    movie_cd: Mapped[str] = mapped_column(
+        String(20), ForeignKey(f"{SCHEMA}.movie.movie_cd", ondelete="CASCADE")
+    )
+    people_cd: Mapped[str] = mapped_column(
+        String(20), ForeignKey(f"{SCHEMA}.person.people_cd", ondelete="CASCADE")
+    )
+    role_type: Mapped[str] = mapped_column(String(20))   # '감독' | '배우'
+    cast_nm: Mapped[Optional[str]] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+    movie: Mapped["Movie"] = relationship(back_populates="credits")
+    person: Mapped["Person"] = relationship(back_populates="credits")
+
+    def __repr__(self) -> str:
+        return f"<MovieCredit movie={self.movie_cd!r} person={self.people_cd!r} role={self.role_type!r}>"
+
+
+class DailyBoxoffice(Base):
+    __tablename__ = "daily_boxoffice"
+    __table_args__ = (
+        UniqueConstraint("movie_cd", "target_date", name="uq_daily_boxoffice"),
+        {"schema": SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    movie_cd: Mapped[str] = mapped_column(
+        String(20), ForeignKey(f"{SCHEMA}.movie.movie_cd", ondelete="CASCADE")
+    )
+    target_date: Mapped[date] = mapped_column(Date, nullable=False)
+    rank_num: Mapped[Optional[int]] = mapped_column(Integer)
+    screen_cnt: Mapped[Optional[int]] = mapped_column(Integer)
+    screen_share: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    show_cnt: Mapped[Optional[int]] = mapped_column(Integer)
+    show_share: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    seat_cnt: Mapped[Optional[int]] = mapped_column(Integer)
+    seat_share: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    seat_sales_rate: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2))
+    sales_amt: Mapped[Optional[int]] = mapped_column(BigInteger)
+    sales_change_dod: Mapped[Optional[int]] = mapped_column(BigInteger)
+    audi_cnt: Mapped[Optional[int]] = mapped_column(Integer)
+    audi_change_dod: Mapped[Optional[int]] = mapped_column(Integer)
+    acc_sales_amt: Mapped[Optional[int]] = mapped_column(BigInteger)
+    acc_audi_cnt: Mapped[Optional[int]] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.current_timestamp()
+    )
+
+    movie: Mapped["Movie"] = relationship(back_populates="boxoffice_records")
+
+    def __repr__(self) -> str:
+        return f"<DailyBoxoffice movie={self.movie_cd!r} date={self.target_date!r}>"
+    
+
+CHAT_SCHEMA = "chat"
+
+class ChatMessage(Base):
+    __tablename__ = "chat_message"
+    __table_args__ = {"schema": CHAT_SCHEMA}
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True, nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False) # 'user' 또는 'assistant'
+    content: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
+
+    def __repr__(self) -> str:
+        return f"<ChatMessage session={self.session_id!r} role={self.role!r}>"
+```
+
+```
+./src/agent/graph.py
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.agent.state import ChatState
+from src.agent.nodes.retriever import RetrieverNode
+from src.agent.nodes.scraper import ScraperNode
+from src.agent.nodes.generator import ask_user_node, answer_node
+from src.agent.nodes.router import route_after_search
+from src.repository.movie import MovieRepository
+
+def build_chat_graph(db: AsyncSession):
+    workflow = StateGraph(ChatState)
+    
+    # 1. 노드 등록 (의존성 주입)
+    repo = MovieRepository()
+    workflow.add_node("retrieve", RetrieverNode(repo, db))
+    workflow.add_node("ask_user", ask_user_node)
+    workflow.add_node("scrape", ScraperNode(db))
+    workflow.add_node("generate", answer_node)
+
+    # 2. 에지 연결
+    workflow.set_entry_point("retrieve")
+    
+    # 조건부 분기
+    workflow.add_conditional_edges(
+        "retrieve",
+        route_after_search,
+        {
+            "ask_user": "ask_user",
+            "generate": "generate"
+        }
+    )
+
+    # 사용자가 Yes라고 했을 때 이어서 갈 경로
+    workflow.add_edge("ask_user", "scrape")
+    workflow.add_edge("scrape", "generate")
+    workflow.add_edge("generate", END)
+
+    # 3. 중단점 설정 (스크래핑 전 멈추기)
+    memory = MemorySaver()
+    app = workflow.compile(
+        checkpointer=memory,
+        interrupt_before=["scrape"]  # 중요: 승인 전에는 절대 스크래핑 안함
+    )
+    return app
+```
+
+```
+./src/agent/__init__.py
+
+
+```
+
+```
+./src/agent/node/scraper.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.agent.state import ChatState
+from src.service.scrape import ScrapeService
+
+class ScraperNode:
+    def __init__(self, db: AsyncSession):
+        self.db = db
+        self.scrape_service = ScrapeService()
+
+    async def __call__(self, state: ChatState):
+        missing = state.get("missing_movies", [])
+        newly_found = []
+        
+        print(f"[{state['session_id']}] {len(missing)}건 수집 시작...")
+        
+        for title in missing:
+            try:
+                # 기존 ScrapeService 활용
+                movie, _ = await self.scrape_service.scrape_and_save(self.db, title)
+                newly_found.append(movie)
+            except Exception as e:
+                print(f"수집 실패 ({title}): {e}")
+        
+        return {
+            "context_movies": newly_found,      # operator.add에 의해 기존 리스트에 추가됨
+            "missing_movies": [],               # 수집 완료 후 비워줌
+            "ai_response": f"{len(newly_found)}건의 정보를 새로 가져왔습니다."
+        }
+```
+
+```
+./src/agent/node/retirever.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.agent.state import ChatState
+from src.repository.movie import MovieRepository
+
+class RetrieverNode:
+    """
+    영화 정보를 검색하는 노드
+    """
+    def __init__(self, repo: MovieRepository, db: AsyncSession):
+        self.repo = repo    # 데이터 접근을 위한 Repository
+        self.db = db        # LangGraph에서 이 노드를 호출할 때 실행되는 메서드
+
+    async def __call__(self, state: ChatState):
+        print(f"[{state['session_id']}] DB 검색 중...")
+        # 사용자 메시지에서 영화 제목을 추출해 DB 검색
+        movies = await self.repo.search(self.db, state["user_message"])
+        return {"context_movies": movies}
+
+```
+
+```
+./src/agent/node/generator.py
+
+from src.agent.state import ChatState
+
+async def ask_user_node(state: ChatState):
+    """수집 동의를 구하는 메시지 생성"""
+    missing = ", ".join(state['missing_movies'])
+    return {
+        "ai_response": f"'{missing}' 정보가 DB에 없습니다. 지금 수집해 올까요?"
+    }
+
+async def answer_node(state: ChatState):
+    """최종 분석 답변 생성 (LLM 연동 지점)"""
+    count = len(state['context_movies'])
+    return {
+        "ai_response": f"찾으신 {count}개의 영화 데이터를 바탕으로 분석해 드릴게요!"
+    }
+```
+
+```
+./src/agent/node/router.py
+
+from typing import Literal
+from src.agent.state import ChatState
+
+def route_after_search(state: ChatState) -> Literal["ask_user", "generate"]:
+    # DB에 없는 영화가 하나라도 있다면 사용자 확인 단계로
+    if state.get("missing_movies"):
+        return "ask_user"
+    return "generate"
+```
+
+```
+./src/agent/state.py
+
+import operator
+from typing import TypedDict, Annotated, List
+from src.core.model import Movie
+
+class ChatState(TypedDict):
+    session_id: str                 # 대화 세션 식별자 (예: UUID)
+    user_message: str               # 사용자가 보낸 메시지
+    mentioned_movies: List[str]     # 대화 중 언급된 영화 제목 리스트
+
+    # 검색된 영화 정보 리스트 (히스토리에 누적)
+    context_movies: Annotated[List[Movie], operator.add]
+    missing_movies: List[str]       # DB에 없는 영화 제목 리스트
+
+    ai_response: str                # AI가 생성한 응답 메시지
+
+```
+
+```
+./src/api/deps.py
+
+import os
+from fastapi import Header, HTTPException, status
+
+INTERNAL_SECRET = os.getenv("INTERNAL_SECRET", "only-from-spring")
+
+def verify_internal(x_internal_secret: str = Header(...)):
+    """Spring 게이트웨이를 통한 내부 요청만 허용"""
+    if x_internal_secret != INTERNAL_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="외부에서 직접 접근할 수 없습니다."
+        )
+
+def get_current_user_email(x_user_email: str = Header(...)) -> str:
+    """Spring이 전달한 인증된 사용자 이메일 추출"""
+    if not x_user_email:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="사용자 정보가 없습니다."
+        )
+    return x_user_email
+
+```
+
+```
+./src/api/request.py
+
+from datetime import date
+from typing import Optional
+
+from pydantic import BaseModel, Field
+
+
+class ScrapeRequest(BaseModel):
+    """POST /movies/scrape 바디 (title을 query param 대신 바디로도 받을 수 있도록 준비)"""
+    title: str = Field(..., min_length=1, max_length=100, examples=["파묘"])
+
+
+class DashboardQuery(BaseModel):
+    """GET /movies/{movie_cd}/dashboard 쿼리 파라미터 모델"""
+    date_from: Optional[date] = Field(None, description="조회 시작일 (YYYY-MM-DD)")
+    date_to: Optional[date] = Field(None, description="조회 종료일 (YYYY-MM-DD)")
+```
+
+```
+./src/api/__init__.py
+
+
+```
+
+```
+./src/api/response.py
+
+from datetime import date, datetime
+from decimal import Decimal
+from typing import List, Optional
+
+from pydantic import BaseModel, ConfigDict
+
+
+class _OrmBase(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PersonOut(_OrmBase):
+    people_cd: str
+    people_nm: str
+    people_nm_en: Optional[str] = None
+
+
+class CreditOut(_OrmBase):
+    role_type: str
+    cast_nm: Optional[str] = None
+    person: PersonOut
+
+
+class MovieSummaryOut(_OrmBase):
+    movie_cd: str
+    movie_nm: str
+    movie_nm_en: Optional[str] = None
+    open_dt: Optional[date] = None
+    rep_genre_nm: Optional[str] = None
+    rep_nation_nm: Optional[str] = None
+
+
+class BoxofficeRowOut(_OrmBase):
+    target_date: date
+    rank_num: Optional[int] = None
+    screen_cnt: Optional[int] = None
+    screen_share: Optional[Decimal] = None
+    show_cnt: Optional[int] = None
+    show_share: Optional[Decimal] = None
+    seat_cnt: Optional[int] = None
+    seat_share: Optional[Decimal] = None
+    seat_sales_rate: Optional[Decimal] = None
+    sales_amt: Optional[int] = None
+    sales_change_dod: Optional[int] = None
+    audi_cnt: Optional[int] = None
+    audi_change_dod: Optional[int] = None
+    acc_sales_amt: Optional[int] = None
+    acc_audi_cnt: Optional[int] = None
+
+
+class DashboardOut(BaseModel):
+    movie: MovieSummaryOut
+    directors: List[CreditOut]
+    actors: List[CreditOut]
+    boxoffice: List[BoxofficeRowOut]
+    total_audi: int
+    total_sales: int
+    peak_audi_date: Optional[date] = None
+    peak_sales_date: Optional[date] = None
+
+
+class ScrapeOut(BaseModel):
+    movie_cd: str
+    movie_nm: str
+    boxoffice_rows: int
+    message: str
+
+
+class SearchOut(BaseModel):
+    query: str
+    count: int
+    results: List[MovieSummaryOut]
+
+
+class ErrorOut(BaseModel):
+    detail: str
+```
+
+```
+./src/api/chat.py
+
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.core.database import get_db
+from src.api.deps import get_current_user_email
+from pydantic import BaseModel
+from sqlalchemy import select
+from src.core.model import ChatMessage
+from src.core.auth import verify_internal
+from src.service.chat import process_langgraph_chat
+
+router = APIRouter(
+    prefix="/chat",
+    tags=["Chat"],
+    # dependencies=[Depends(verify_internal)]  # 잠시
+)
+
+class ChatMessageRequest(BaseModel):
+    message: str
+
+@router.get("/sessions/{session_id}/messages")
+async def get_messages(
+    session_id: str,
+    # user_email: str = Depends(get_current_user_email), 잠시
+    db: AsyncSession = Depends(get_db)
+):
+    """세션의 과거 대화 내역 조회"""
+    stmt = select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at)
+    result = await db.execute(stmt)
+    messages = result.scalars().all()
+    
+    return {"session_id": session_id, "messages": messages}
+
+@router.post("/sessions/{session_id}/messages")
+async def send_message(
+    session_id: str,
+    payload: ChatMessageRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    # 1. 사용자 메시지 저장
+    user_msg = ChatMessage(session_id=session_id, role="user", content=payload.message)
+    db.add(user_msg)
+    await db.commit()
+
+    # 2. LangGraph 에이전트 실행
+    result = await process_langgraph_chat(session_id, payload.message, db)
+
+    # 3. AI 응답 저장
+    ai_msg = ChatMessage(session_id=session_id, role="assistant", content=result["content"])
+    db.add(ai_msg)
+    await db.commit()
+
+    # 4. 결과 반환 (프론트엔드에 승인 필요 여부를 알려줌)
+    return {
+        "session_id": session_id,
+        "role": "assistant",
+        "content": result["content"],
+        "is_approval_required": result["is_approval_required"],
+        "missing_movies": result["missing_movies"]
+    }
+
+```
+
+```
+./src/api/router.py
+
+from datetime import date
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from src.api.deps import verify_internal, get_current_user_email
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.response import (
+    BoxofficeRowOut,
+    CreditOut,
+    DashboardOut,
+    MovieSummaryOut,
+    ScrapeOut,
+    SearchOut,
+)
+from src.core.database import get_db
+from src.service.movie import MovieService
+from src.service.scrape import ScrapeService
+
+"""
+영화 API 엔드포인트
+- GET  /movies/search?q={title} → 영화 제목 검색
+- POST /movies/scrape?title={title} → KOBIS API + 스크래핑 → DB 적재
+- GET  /movies/{movie_cd}/dashboard → 영화 대시보드 데이터 조회
+"""
+
+# API 라우터 정의
+# tags=['Movies'] → Swagger UI에서 엔드포인트 그룹화
+router = APIRouter(prefix="/movies", tags=["Movies"])
+
+# 서비스 인스턴스 (싱글톤으로 재사용)
+_movie_svc = MovieService()
+_scrape_svc = ScrapeService()
+
+
+# --------------------------------------------- ENDPOINT ---------------------------------------------
+
+@router.get("/search", response_model=SearchOut, summary="영화 DB 검색")
+async def search_movies(
+    q: str = Query(..., min_length=1, description="검색할 영화 제목"),
+    # user_email: str = Depends(get_current_user_email), 잠시
+    db: AsyncSession = Depends(get_db),
+) -> SearchOut:
+    """
+    제목(한글/영문) LIKE 검색. 최대 20건 반환.
+    param
+    - q: 검색어 (필수, 최소 1자)
+    - db: DB 세션 (의존성 주입)
+    returns:
+    - query: 검색어
+    - count: 검색 결과 수
+    - results: 영화 요약 정보 리스트
+    """
+    movies = await _movie_svc.search(db, q)
+    return SearchOut(
+        query=q,
+        count=len(movies),
+        results=[MovieSummaryOut.model_validate(m) for m in movies],
+    )
+
+
+@router.post(
+    "/scrape",
+    response_model=ScrapeOut,
+    status_code=status.HTTP_201_CREATED,
+    summary="영화 스크래핑 및 DB 적재",
+)
+async def scrape_movie(
+    title: str = Query(..., min_length=1, description="스크래핑할 영화 제목"),
+    db: AsyncSession = Depends(get_db),
+    # user_email: str = Depends(get_current_user_email), 잠시
+) -> ScrapeOut:
+    """
+    주어진 영화 제목으로 스크래핑하고 DB에 적재합니다.
+    param
+        title: 스크래핑할 영화 제목 (필수, 최소 1자)
+        db: DB 세션 (의존성 주입)
+    returns:
+        ScrapeOut: 스크래핑 결과
+    """
+    try:
+        movie, bo_count = await _scrape_svc.scrape_and_save(db, title)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"스크래핑 중 오류가 발생했습니다: {e}",
+        )
+
+    return ScrapeOut(
+        movie_cd=movie.movie_cd,
+        movie_nm=movie.movie_nm,
+        boxoffice_rows=bo_count,
+        message=f"'{movie.movie_nm}' 박스오피스 {bo_count}건 적재 완료",
+    )
+
+
+@router.get(
+    "/{movie_cd}/dashboard",
+    response_model=DashboardOut,
+    summary="영화 대시보드 데이터 조회",
+)
+async def get_dashboard(
+    movie_cd: str,
+    date_from: Optional[date] = Query(None, description="조회 시작일 (YYYY-MM-DD)"),
+    date_to: Optional[date] = Query(None, description="조회 종료일 (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db),
+    # user_email: str = Depends(get_current_user_email), 잠시
+) -> DashboardOut:
+    """
+    영화 대시보드 데이터 조회
+    params:
+    - movie_cd: 영화 코드 (필수)
+    - date_from: 조회 시작일 (선택, YYYY-MM-DD)
+    - date_to: 조회 종료일 (선택, YYYY-MM-DD)
+    returns:
+    - movie: 영화 상세 정보
+    - directors: 감독 정보 리스트
+    - actors: 배우 정보 리스트
+    - boxoffice: 박스오피스 시계열 데이터 리스트
+    - total_audi: 누적 관객 수
+    - total_sales: 누적 매출액
+    - peak_audi_date: 관객 수 최고일
+    - peak_sales_date: 매출액 최고일
+    """
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="date_from은 date_to보다 이전이어야 합니다.",
+        )
+
+    try:
+        result = await _movie_svc.get_dashboard(db, movie_cd, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+    return DashboardOut(
+        movie=MovieSummaryOut.model_validate(result.movie),
+        directors=[CreditOut.model_validate(c) for c in result.directors],
+        actors=[CreditOut.model_validate(c) for c in result.actors],
+        boxoffice=[BoxofficeRowOut.model_validate(b) for b in result.boxoffice],
+        total_audi=result.total_audi,
+        total_sales=result.total_sales,
+        peak_audi_date=result.peak_audi_date,
+        peak_sales_date=result.peak_sales_date,
+    )
+
+```
+
+```
+./src/external/scraper.py
+
+"""
+KOBIS 박스오피스 HTML 다운로드 및 DataFrame 파싱.
+"""
+
+import io
+
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+
+_KOBIS_BASE = "https://www.kobis.or.kr/kobis/business"
+_CSRF_URL = f"{_KOBIS_BASE}/mast/mvie/searchMovieList.do"
+_DOWNLOAD_URL = f"{_KOBIS_BASE}/mast/mvie/searchMovieDtlXls.do"
+
+# KOBIS 컬럼명 → 내부 필드명 매핑
+COLUMN_MAP: dict[str, str] = {
+    "날짜": "target_date",
+    "순위": "rank_num",
+    "스크린수": "screen_cnt",
+    "스크린점유율": "screen_share",
+    "상영횟수": "show_cnt",
+    "상영점유율": "show_share",
+    "좌석수": "seat_cnt",
+    "좌석점유율": "seat_share",
+    "좌석판매율": "seat_sales_rate",
+    "매출액": "sales_amt",
+    "매출액증감(전일대비)": "sales_change_dod",
+    "관객수": "audi_cnt",
+    "관객수증감(전일대비)": "audi_change_dod",
+    "누적매출액": "acc_sales_amt",
+    "누적관객수": "acc_audi_cnt",
+}
+
+_SKIP_PATTERNS = ("합계", "평균", "조회일", "날짜")
+
+
+def _clean_numeric(val: object) -> int | float:
+    """'5,173 ( 100.0% )' 형태 문자열에서 숫자만 추출."""
+    if pd.isna(val):
+        return 0
+    s = str(val).replace(",", "").replace("%", "").split("(")[0].strip()
+    try:
+        return float(s) if "." in s else int(s)
+    except ValueError:
+        return 0
+
+
+def fetch_boxoffice(movie_cd: str) -> pd.DataFrame | None:
+    """
+    movie_cd에 해당하는 박스오피스 데이터를 스크래핑하여 정제된 DataFrame 반환.
+    실패 시 None 반환.
+    """
+    session = requests.Session()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    try:
+        # CSRF 토큰 획득
+        csrf_resp = session.get(_CSRF_URL, headers=headers, timeout=10)
+        soup = BeautifulSoup(csrf_resp.text, "html.parser")
+        csrf_input = soup.select_one('input[name="CSRFToken"]')
+        if not csrf_input:
+            raise ValueError("CSRF 토큰을 찾을 수 없습니다.")
+        csrf_token = csrf_input["value"]
+
+        # 박스오피스 HTML 다운로드
+        dl_resp = session.post(
+            _DOWNLOAD_URL,
+            data={"code": movie_cd, "sType": "box", "CSRFToken": csrf_token},
+            headers=headers,
+            timeout=30,
+        )
+        dl_resp.encoding = "utf-8"
+
+        # '날짜' 컬럼이 있는 테이블 탐색
+        tables = pd.read_html(io.StringIO(dl_resp.text))
+        target_df = next(
+            (
+                df
+                for df in tables
+                if "날짜" in "".join(df.columns.astype(str))
+                or (not df.empty and "날짜" in "".join(df.iloc[0].astype(str)))
+            ),
+            None,
+        )
+        if target_df is None:
+            return None
+
+        # 첫 행이 헤더인 경우 처리
+        if "날짜" not in target_df.columns:
+            target_df.columns = target_df.iloc[0]
+            target_df = target_df.iloc[1:].reset_index(drop=True)
+
+        # 컬럼명 정제 및 불필요 행 제거
+        target_df.columns = [str(c).strip() for c in target_df.columns]
+        target_df = target_df.dropna(subset=["날짜"])
+        target_df = target_df[
+            ~target_df["날짜"].astype(str).str.contains("|".join(_SKIP_PATTERNS))
+        ]
+
+        # 존재하는 컬럼만 매핑
+        available = {k: v for k, v in COLUMN_MAP.items() if k in target_df.columns}
+        target_df = target_df[list(available)].rename(columns=available)
+
+        # 날짜 파싱 및 숫자 정제
+        target_df["target_date"] = pd.to_datetime(target_df["target_date"]).dt.date
+        for col in target_df.columns:
+            if col != "target_date":
+                target_df[col] = target_df[col].apply(_clean_numeric)
+
+        return target_df
+
+    except Exception as exc:
+        print(f"[Scraper] Error for movie_cd={movie_cd}: {exc}")
+        return None
+```
+
+```
+./src/external/kobis.py
+
+
+import requests
+
+from src.core.config import get_settings
+
+settings = get_settings()
+
+
+class KobisClient:
+    """
+    KOBIS Open API 클라이언트.
+    네트워크 I/O만 담당하며 비즈니스 로직은 포함하지 않습니다.
+    """
+    BASE_URL = "http://www.kobis.or.kr/kobisopenapi/webservice/rest"
+
+    def __init__(self) -> None:
+        self._api_key = settings.KOBIS_API_KEY
+
+    def get_movie_code(self, title: str) -> str | None:
+        """영화 제목으로 movie_cd 조회. 정확히 일치하는 첫 번째 항목 반환."""
+        resp = requests.get(
+            f"{self.BASE_URL}/movie/searchMovieList.json",
+            params={"key": self._api_key, "movieNm": title},
+            timeout=10,
+        )
+        resp.raise_for_status()
+
+        movie_list = resp.json().get("movieListResult", {}).get("movieList", [])
+        for movie in movie_list:
+            if movie.get("movieNm") == title:
+                return movie.get("movieCd")
+        return None
+
+    def get_movie_detail(self, movie_cd: str) -> dict:
+        """movie_cd로 상세정보(감독·배우·장르 등) 조회."""
+        resp = requests.get(
+            f"{self.BASE_URL}/movie/searchMovieInfo.json",
+            params={"key": self._api_key, "movieCd": movie_cd},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("movieInfoResult", {}).get("movieInfo", {})
+
+```
+
+```
+./src/service/__init__.py
+
+
+```
+
+```
+./src/service/chat.py
+
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.agent.graph import build_chat_graph
+
+async def process_langgraph_chat(session_id: str, user_message: str, db: AsyncSession) -> dict:
+    """
+    LangGraph 에이전트 실행 및 중단점 처리 로직
+    """
+    # 1. 그래프 빌드 (MemorySaver가 포함된 app)
+    app = build_chat_graph(db)
+    
+    # 2. 고유 스레드 ID 설정 (세션별로 대화 상태를 추적)
+    config = {"configurable": {"thread_id": session_id}}
+
+    # 3. 현재 상태 확인 (중단된 상태인지 체크)
+    state_snapshot = await app.aget_state(config)
+
+    # 상황 A: 사용자가 "수집해줘(Yes)"라고 응답한 경우 (이전 단계에서 멈춰있을 때)
+    if state_snapshot.next and "scrape" in state_snapshot.next:
+        # 멈춰있던 지점부터 다시 실행 (입력값은 None으로 주어 상태를 이어감)
+        async for event in app.astream(None, config, stream_mode="values"):
+            final_state = event
+    
+    # 상황 B: 새로운 질문이 들어온 경우
+    else:
+        initial_input = {
+            "session_id": session_id,
+            "user_message": user_message,
+            # @태그 등을 파싱하는 로직이 있다면 여기서 mentioned_movies에 넣어줌
+            "mentioned_movies": [m.strip("@") for m in user_message.split() if m.startswith("@")],
+            "context_movies": [],
+            "missing_movies": []
+        }
+        
+        async for event in app.astream(initial_input, config, stream_mode="values"):
+            final_state = event
+
+    # 4. 실행 후 다시 중단됐는지(승인이 필요한지) 확인
+    new_snapshot = await app.aget_state(config)
+    is_interrupted = len(new_snapshot.next) > 0 and "scrape" in new_snapshot.next
+
+    return {
+        "content": final_state.get("ai_response", "응답을 생성하지 못했습니다."),
+        "is_approval_required": is_interrupted, # 프론트엔드에서 버튼을 띄울지 결정하는 플래그
+        "missing_movies": final_state.get("missing_movies", [])
+    }
+```
+
+```
+./src/service/movie.py
+
+from dataclasses import dataclass
+from datetime import date
+from typing import Optional
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.model import DailyBoxoffice, Movie, MovieCredit
+from src.repository.movie import MovieRepository
+
+_repo = MovieRepository()
+
+
+@dataclass
+class DashboardResult:
+    movie: Movie
+    directors: list[MovieCredit]
+    actors: list[MovieCredit]
+    boxoffice: list[DailyBoxoffice]
+    total_audi: int
+    total_sales: int
+    peak_audi_date: Optional[date]
+    peak_sales_date: Optional[date]
+
+
+class MovieService:
+    """
+    영화 조회 및 대시보드 집계 전담.
+    외부 API 호출이나 스크래핑은 포함하지 않습니다.
+    """
+
+    async def search(self, db: AsyncSession, query: str) -> list[Movie]:
+        return await _repo.search(db, query)
+
+    async def get_dashboard(
+        self,
+        db: AsyncSession,
+        movie_cd: str,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+    ) -> DashboardResult:
+        movie = await _repo.get_with_credits(db, movie_cd)
+        if not movie:
+            raise ValueError(f"movie_cd='{movie_cd}' 에 해당하는 영화가 없습니다.")
+
+        boxoffice = await _repo.get_boxoffice(db, movie_cd, date_from, date_to)
+
+        directors = [c for c in movie.credits if c.role_type == "감독"]
+        actors = [c for c in movie.credits if c.role_type == "배우"]
+
+        # 누적 집계는 마지막 행 기준
+        last = boxoffice[-1] if boxoffice else None
+        total_audi = int(last.acc_audi_cnt or 0) if last else 0
+        total_sales = int(last.acc_sales_amt or 0) if last else 0
+
+        peak_audi = max(boxoffice, key=lambda r: r.audi_cnt or 0, default=None)
+        peak_sales = max(boxoffice, key=lambda r: r.sales_amt or 0, default=None)
+
+        return DashboardResult(
+            movie=movie,
+            directors=directors,
+            actors=actors,
+            boxoffice=boxoffice,
+            total_audi=total_audi,
+            total_sales=total_sales,
+            peak_audi_date=peak_audi.target_date if peak_audi else None,
+            peak_sales_date=peak_sales.target_date if peak_sales else None,
+        )
+```
+
+```
+./src/service/news.py
+
+
+```
+
+```
+./src/service/scrape.py
+
+import asyncio
+from datetime import date
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.core.model import Movie
+from src.external.kobis import KobisClient
+from src.external.scraper import fetch_boxoffice
+from src.repository.movie import MovieRepository
+
+_kobis = KobisClient()
+_repo = MovieRepository()
+
+
+def _parse_open_dt(raw: str) -> date | None:
+    """'YYYYMMDD' 문자열 → date 객체. 형식이 맞지 않으면 None."""
+    if raw and len(raw) == 8:
+        try:
+            return date(int(raw[:4]), int(raw[4:6]), int(raw[6:]))
+        except ValueError:
+            pass
+    return None
+
+
+class ScrapeService:
+    """
+    KOBIS API 호출 + 스크래핑 + DB 저장 파이프라인 전담.
+    blocking I/O(requests)는 스레드 풀에서 실행합니다.
+    """
+
+    async def scrape_and_save(
+        self, db: AsyncSession, title: str
+    ) -> tuple[Movie, int]:
+        """
+        1) KOBIS API로 movie_cd 조회
+        2) 영화 상세정보 + 출연진 저장
+        3) 박스오피스 스크래핑 → DB upsert
+        반환: (Movie 객체, 적재된 박스오피스 행 수)
+        """
+        loop = asyncio.get_event_loop()
+
+        # blocking I/O → 스레드 풀 실행
+        movie_cd = await loop.run_in_executor(None, _kobis.get_movie_code, title)
+        if not movie_cd:
+            raise ValueError(f"KOBIS에서 '{title}' 영화 코드를 찾을 수 없습니다.")
+
+        info = await loop.run_in_executor(None, _kobis.get_movie_detail, movie_cd)
+
+        movie = await self._save_movie_and_credits(db, info)
+
+        df = await loop.run_in_executor(None, fetch_boxoffice, movie_cd)
+        bo_count = 0
+        if df is not None:
+            df["movie_cd"] = movie_cd
+            bo_count = await _repo.upsert_boxoffice_rows(db, df)
+
+        return movie, bo_count
+
+    async def _save_movie_and_credits(
+        self, db: AsyncSession, info: dict
+    ) -> Movie:
+        movie_data = {
+            "movie_cd": info["movieCd"],
+            "movie_nm": info["movieNm"],
+            "movie_nm_en": info.get("movieNmEn"),
+            "open_dt": _parse_open_dt(info.get("openDt", "")),
+            "rep_genre_nm": (
+                info["genres"][0]["genreNm"] if info.get("genres") else None
+            ),
+        }
+        movie = await _repo.upsert_movie(db, movie_data)
+
+        credits = [
+            (d["peopleNm"], "감독", None)
+            for d in info.get("directors", [])
+        ] + [
+            (a["peopleNm"], "배우", a.get("cast"))
+            for a in info.get("actors", [])
+        ]
+
+        for name, role, cast in credits:
+            p_cd = f"P_{name}"
+            await _repo.upsert_person(db, p_cd, name)
+            await _repo.upsert_credit(db, movie.movie_cd, p_cd, role, cast)
+
+        return movie
+```
+

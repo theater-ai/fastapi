@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # KOBIS
     KOBIS_API_KEY: str = os.getenv("KOBIS_API_KEY", "")
 
+    # OpenAI
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+
     # App
     APP_TITLE: str = "Movie Dashboard API"
     APP_VERSION: str = "0.1.0"
