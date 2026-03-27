@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # KOBIS
     KOBIS_API_KEY: str = os.getenv("KOBIS_API_KEY", "")
 
+    # TMDB
+    TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
+
     # OpenAI
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 

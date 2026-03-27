@@ -126,6 +126,7 @@ async def get_dashboard(
     - peak_audi_date: 관객 수 최고일
     - peak_sales_date: 매출액 최고일
     """
+
     if date_from and date_to and date_from > date_to:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

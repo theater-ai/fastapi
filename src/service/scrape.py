@@ -5,11 +5,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.model import Movie
 from src.external.kobis import KobisClient
+from src.external.tmdb import TmdbClient
 from src.external.scraper import fetch_boxoffice
 from src.repository.movie import MovieRepository
 
 _kobis = KobisClient()
 _repo = MovieRepository()
+_tmdb = TmdbClient()
 
 
 def _parse_open_dt(raw: str) -> date | None:
@@ -59,15 +61,42 @@ class ScrapeService:
     async def _save_movie_and_credits(
         self, db: AsyncSession, info: dict
     ) -> Movie:
+        loop = asyncio.get_event_loop()
+        
+        # 1. KOBIS 개봉일 기반으로 연도 추출
+        open_dt_str = info.get("openDt", "")
+        release_year = open_dt_str[:4] if len(open_dt_str) >= 4 else None
+
+        # 2. TMDB 상세 정보 조회 (스레드 풀 사용)
+        tmdb_info = await loop.run_in_executor(
+            None, _tmdb.get_movie_extra_info, info["movieNm"], release_year
+        )
+
+        # 3. KOBIS 데이터에 없는 국가 정보 보완
+        # KOBIS는 nations 배열에 넣어주기도 하지만 repNationNm 컬럼을 쓰기도 함
+        nation = info.get("repNationNm") or (info.get("nations")[0]["nationNm"] if info.get("nations") else None)
+        
+        # KOBIS에 국가가 없는데 TMDB엔 있다면 TMDB 국가 이름 사용
+        if not nation and tmdb_info.get("production_countries"):
+            nation = tmdb_info["production_countries"][0].get("name") # ex: "United States of America"
+
+        # 4. 포스터 URL 및 시놉시스 추출
+        poster_path = tmdb_info.get("poster_path")
+        poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+        synopsis = tmdb_info.get("overview")
+
+        # 5. DB 적재용 데이터 구성
         movie_data = {
             "movie_cd": info["movieCd"],
             "movie_nm": info["movieNm"],
-            "movie_nm_en": info.get("movieNmEn"),
-            "open_dt": _parse_open_dt(info.get("openDt", "")),
-            "rep_genre_nm": (
-                info["genres"][0]["genreNm"] if info.get("genres") else None
-            ),
+            "movie_nm_en": info.get("movieNmEn") or tmdb_info.get("original_title"), # 영문명도 TMDB로 보완 가능
+            "open_dt": _parse_open_dt(open_dt_str),
+            "rep_genre_nm": (info["genres"][0]["genreNm"] if info.get("genres") else None),
+            "rep_nation_nm": nation,
+            "poster_url": poster_url,
+            "synopsis": synopsis,
         }
+        
         movie = await _repo.upsert_movie(db, movie_data)
 
         credits = [

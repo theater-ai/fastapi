@@ -77,7 +77,13 @@ class MovieRepository:
             .values(**movie_data)
             .on_conflict_do_update(
                 index_elements=["movie_cd"],
-                set_={"movie_nm": movie_data["movie_nm"]},
+                set_={
+                    "movie_nm": movie_data["movie_nm"],
+                    "movie_nm_en": movie_data["movie_nm_en"],
+                    "rep_nation_nm": movie_data["rep_nation_nm"],
+                    "poster_url": movie_data["poster_url"],
+                    "synopsis": movie_data["synopsis"],
+                },
             )
         )
         await db.flush()

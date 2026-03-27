@@ -28,7 +28,8 @@ class MovieSummaryOut(_OrmBase):
     open_dt: Optional[date] = None
     rep_genre_nm: Optional[str] = None
     rep_nation_nm: Optional[str] = None
-
+    poster_url: Optional[str] = None
+    synopsis: Optional[str] = None
 
 class BoxofficeRowOut(_OrmBase):
     target_date: date

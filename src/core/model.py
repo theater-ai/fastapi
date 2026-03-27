@@ -39,6 +39,9 @@ class Movie(Base):
     open_dt: Mapped[Optional[date]] = mapped_column(Date)
     rep_genre_nm: Mapped[Optional[str]] = mapped_column(String(50))
     rep_nation_nm: Mapped[Optional[str]] = mapped_column(String(50))
+    poster_url: Mapped[Optional[str]] = mapped_column(String(500))
+    synopsis: Mapped[Optional[str]] = mapped_column(String)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.current_timestamp()
     )
